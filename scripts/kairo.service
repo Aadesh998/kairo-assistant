@@ -1,0 +1,16 @@
+[Unit]
+Description=Kairo personal AI agent
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/kairo start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,119 @@
+name: Kairo
+owner: Your Name
+timezone: Asia/Kolkata
+model: claude-opus-5-5
+effort: medium
+max_steps: 12
+
+default_delegate: claude-code
+delegates:
+  - name: claude-code
+    command: [claude, -p, "{task}", --output-format, json, --permission-mode, acceptEdits]
+  - name: codex
+    command: [codex, exec, --sandbox, workspace-write, "{task}"]
+
+voice:
+  enabled: true
+  sleep_phrases:
+    - go to sleep
+    - kairo sleep
+    - cairo sleep
+  idle_seconds: 60
+  stt: elevenlabs
+  tts: elevenlabs
+  elevenlabs_voice_id: 21m00Tcm4TlvDq8ikWAM
+  elevenlabs_tts_model: eleven_flash_v2_5
+  elevenlabs_stt_model: scribe_v1
+  whisper_bin: whisper-cli
+  whisper_model: ~/.kairo/models/ggml-base.en.bin
+  piper_bin: piper
+  piper_model: ~/.kairo/models/en_US-lessac-medium.onnx
+  language: en
+  silence_level: 0.008
+  mic: ""
+
+jev:
+  model: jev-latest
+  threshold: 0.7
+
+mail:
+  enabled: false
+  address: ""
+  server: imap.gmail.com:993
+  mailbox: INBOX
+
+calendar:
+  enabled: false
+  calendar_id: primary
+  remind_minutes: 10
+  join_meetings: true
+  ask_before_join: true
+  ask_minutes_before: 2
+  wait_for_answer_seconds: 60
+  if_no_answer: join_muted
+
+memory:
+  compact_at: "03:00"
+  max_facts: 60
+  max_thread_length: 40
+
+channels:
+  telegram:
+    enabled: false
+    owner_chat_id: 0
+  slack:
+    enabled: false
+    owner_user_id: ""
+  whatsapp:
+    enabled: false
+    owner_number: ""
+
+notify:
+  send_to: all
+  primary: telegram
+  voice_commands: false
+  quiet_from: "23:00"
+  quiet_to: "07:30"
+  approval_seconds: 600
+
+browser:
+  bin: google-chrome-stable
+  profile_dir: ~/.kairo/chrome-profile
+  password_store: ""
+  mode: kairo
+  profile_directory: Default
+
+skills:
+  paths:
+    - ~/.kairo/skills
+    - ~/Documents/research/ECC/skills
+  allow:
+    - email-ops
+    - messages-ops
+    - unified-notifications-ops
+    - operator-approval-loop
+    - counterparty-channel-discipline
+    - google-workspace-ops
+    - knowledge-ops
+    - research-ops
+    - market-research
+    - competitive-platform-analysis
+    - project-flow-ops
+    - github-ops
+    - product-lens
+    - product-capability
+    - brand-voice
+    - article-writing
+    - council
+    - customer-billing-ops
+
+guardrails:
+  protected_paths: []
+
+learning:
+  rate: 0.2
+  auto_score: 0.8
+  auto_count: 5
+
+ui:
+  orb: true

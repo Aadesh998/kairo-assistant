@@ -1,0 +1,4 @@
+kairo
+.env
+*.db
+assets/orb/

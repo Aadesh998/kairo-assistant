@@ -1,0 +1,13 @@
+owner: Your Name
+greeting: "Good morning."
+work_style:
+  - Keep spoken answers short and clear.
+  - Always ask before sending messages to other people.
+  - Prefer doing the work quietly and sending me an update.
+routine:
+  - at: "09:30"
+    days: [mon, tue, wed, thu, fri]
+    do: greet_and_brief
+  - at: "18:30"
+    days: [mon, tue, wed, thu, fri]
+    do: evening_summary
