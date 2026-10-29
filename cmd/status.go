@@ -43,7 +43,11 @@ var statusCmd = &cobra.Command{
 		if cfg.Channels.WhatsApp.Enabled {
 			channels = append(channels, "whatsapp")
 		}
-		fmt.Printf("wake: Space + K   voice: %s / %s   channels: %s\n", cfg.Voice.STT, cfg.Voice.TTS, strings.Join(channels, ", "))
+		voiceText := fmt.Sprintf("wake: Space + K   voice: %s / %s", cfg.Voice.STT, cfg.Voice.TTS)
+		if !cfg.Voice.Enabled {
+			voiceText = "voice: off (text only)"
+		}
+		fmt.Printf("%s   channels: %s\n", voiceText, strings.Join(channels, ", "))
 
 		mailText := "off"
 		if cfg.Mail.Enabled {

@@ -30,10 +30,20 @@ const (
 )
 
 var (
-	errClosed  = errors.New("closed")
-	pillColor  = color.NRGBA{R: 246, G: 245, B: 250, A: 255}
-	captionInk = color.NRGBA{R: 62, G: 58, B: 86, A: 255}
-	modeInk    = map[string]color.NRGBA{
+	errClosed   = errors.New("closed")
+	pillColor   = color.NRGBA{R: 246, G: 245, B: 250, A: 255}
+	captionInk  = color.NRGBA{R: 62, G: 58, B: 86, A: 255}
+	askInk      = color.NRGBA{R: 214, G: 120, B: 30, A: 255}
+	stopFill    = color.NRGBA{R: 210, G: 70, B: 70, A: 255}
+	cardButtons = []struct {
+		label, answer string
+		fill, ink     color.NRGBA
+	}{
+		{"Yes", "yes", color.NRGBA{R: 40, G: 160, B: 110, A: 255}, color.NRGBA{R: 255, G: 255, B: 255, A: 255}},
+		{"No", "no", color.NRGBA{R: 225, G: 222, B: 236, A: 255}, captionInk},
+		{"Later", "later", color.NRGBA{R: 225, G: 222, B: 236, A: 255}, captionInk},
+	}
+	modeInk = map[string]color.NRGBA{
 		"listening": {R: 30, G: 150, B: 220, A: 255},
 		"thinking":  {R: 140, G: 90, B: 220, A: 255},
 		"speaking":  {R: 40, G: 160, B: 110, A: 255},
@@ -55,6 +65,13 @@ type orbWindow struct {
 	grabX, grabY  int
 	lastClick     time.Time
 	lastAlive     time.Time
+	buttons       []button
+	answered      string
+}
+
+type button struct {
+	x0, y0, x1, y1 float64
+	answer         string
 }
 
 func Run() error {
@@ -92,6 +109,9 @@ func (w *orbWindow) Update() error {
 		}
 		w.placed = true
 	}
+	if w.clickedButton() {
+		return nil
+	}
 	if w.closeRequested() {
 		signalDaemon(syscall.SIGUSR2)
 		return errClosed
@@ -108,7 +128,10 @@ func (w *orbWindow) Update() error {
 		w.state = voice.ReadState()
 		w.lastRead = now
 	}
-	if w.state.Mode == "sleeping" || w.state.Mode == "" {
+	if w.state.AskID != w.answered {
+		w.answered = ""
+	}
+	if (w.state.Mode == "sleeping" || w.state.Mode == "") && !w.asking() {
 		if w.sleepingSince.IsZero() {
 			w.sleepingSince = now
 		} else if now.Sub(w.sleepingSince) > 1500*time.Millisecond {
@@ -143,7 +166,87 @@ func (w *orbWindow) Draw(screen *ebiten.Image) {
 	op.GeoM.Scale(fit*scale, fit*scale)
 	op.GeoM.Translate(float64(bounds.Dx())/2, CenterY*fit+float64(bounds.Dx())*0.04)
 	screen.DrawImage(frame, op)
+	if w.asking() {
+		w.drawCard(screen, fit)
+		return
+	}
+	w.buttons = nil
 	w.drawPill(screen, fit)
+}
+
+func (w *orbWindow) asking() bool {
+	return w.state.AskID != "" && w.state.AskID != w.answered
+}
+
+// drawCard shows a waiting approval with Yes / No / Later buttons, so the
+// owner answers with a click instead of by voice.
+func (w *orbWindow) drawCard(screen *ebiten.Image, unit float64) {
+	titleFace := &text.GoTextFace{Source: w.font, Size: 13 * unit}
+	bodyFace := &text.GoTextFace{Source: w.font, Size: 15 * unit}
+	lines := wrap(w.state.Ask, pillLine, 3)
+	lineH := 21 * unit
+	buttonH := 34 * unit
+	boxW := float64(screen.Bounds().Dx()) - 40*unit
+	boxH := 20*unit + 18*unit + lineH*float64(len(lines)) + 12*unit + buttonH + 14*unit
+	x := 20 * unit
+	y := float64(screen.Bounds().Dy()) - boxH - 14*unit
+	roundRect(screen, x, y, boxW, boxH, 18*unit, pillColor)
+	top := &text.DrawOptions{}
+	top.GeoM.Translate(x+16*unit, y+10*unit)
+	top.ColorScale.ScaleWithColor(askInk)
+	text.Draw(screen, "• NEEDS YOUR OK", titleFace, top)
+	for i, line := range lines {
+		op := &text.DrawOptions{}
+		op.GeoM.Translate(x+16*unit, y+30*unit+lineH*float64(i))
+		op.ColorScale.ScaleWithColor(captionInk)
+		text.Draw(screen, line, bodyFace, op)
+	}
+	gap := 10 * unit
+	bx := x + 16*unit
+	by := y + 30*unit + lineH*float64(len(lines)) + 12*unit
+	bw := (boxW - 32*unit - 2*gap) / float64(len(cardButtons))
+	w.buttons = w.buttons[:0]
+	for _, b := range cardButtons {
+		roundRect(screen, bx, by, bw, buttonH, buttonH/2, b.fill)
+		lw, lh := text.Measure(b.label, bodyFace, 0)
+		op := &text.DrawOptions{}
+		op.GeoM.Translate(bx+(bw-lw)/2, by+(buttonH-lh)/2)
+		op.ColorScale.ScaleWithColor(b.ink)
+		text.Draw(screen, b.label, bodyFace, op)
+		w.buttons = append(w.buttons, button{bx, by, bx + bw, by + buttonH, b.answer})
+		bx += bw + gap
+	}
+}
+
+func (w *orbWindow) clickedButton() bool {
+	if !inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		return false
+	}
+	cx, cy := ebiten.CursorPosition()
+	for _, b := range w.buttons {
+		if float64(cx) >= b.x0 && float64(cx) <= b.x1 && float64(cy) >= b.y0 && float64(cy) <= b.y1 {
+			if b.answer == "stop" {
+				signalDaemon(syscall.SIGUSR2)
+			} else if voice.WriteAnswer(w.state.AskID, b.answer) == nil {
+				signalDaemon(syscall.SIGHUP)
+				w.answered = w.state.AskID
+			}
+			w.lastClick = time.Time{}
+			return true
+		}
+	}
+	return false
+}
+
+func roundRect(screen *ebiten.Image, x, y, width, height, radius float64, fill color.NRGBA) {
+	r := float32(radius)
+	vector.FillRect(screen, float32(x)+r, float32(y), float32(width)-2*r, float32(height), fill, true)
+	vector.FillRect(screen, float32(x), float32(y)+r, float32(width), float32(height)-2*r, fill, true)
+	for _, c := range [][2]float64{{x, y}, {x + width, y}, {x, y + height}, {x + width, y + height}} {
+		cx := c[0] + math.Copysign(radius, x+width/2-c[0])
+		cy := c[1] + math.Copysign(radius, y+height/2-c[1])
+		vector.FillCircle(screen, float32(cx), float32(cy), r, fill, true)
+	}
 }
 
 func (w *orbWindow) drawPill(screen *ebiten.Image, unit float64) {
@@ -156,14 +259,7 @@ func (w *orbWindow) drawPill(screen *ebiten.Image, unit float64) {
 	boxH := 20*unit + 18*unit + lineH*float64(len(lines))
 	x := 20 * unit
 	y := float64(screen.Bounds().Dy()) - boxH - 14*unit
-	r := float32(18 * unit)
-	vector.FillRect(screen, float32(x)+r, float32(y), float32(boxW)-2*r, float32(boxH), pillColor, true)
-	vector.FillRect(screen, float32(x), float32(y)+r, float32(boxW), float32(boxH)-2*r, pillColor, true)
-	for _, c := range [][2]float64{{x, y}, {x + boxW, y}, {x, y + boxH}, {x + boxW, y + boxH}} {
-		cx := c[0] + math.Copysign(float64(r), x+boxW/2-c[0])
-		cy := c[1] + math.Copysign(float64(r), y+boxH/2-c[1])
-		vector.FillCircle(screen, float32(cx), float32(cy), r, pillColor, true)
-	}
+	roundRect(screen, x, y, boxW, boxH, 18*unit, pillColor)
 	ink, ok := modeInk[w.state.Mode]
 	if !ok {
 		ink = modeInk["awake"]
@@ -178,6 +274,24 @@ func (w *orbWindow) drawPill(screen *ebiten.Image, unit float64) {
 		op.ColorScale.ScaleWithColor(captionInk)
 		text.Draw(screen, line, bodyFace, op)
 	}
+	if w.state.Mode == "thinking" {
+		w.drawStop(screen, titleFace, x+boxW-16*unit, y+7*unit, unit)
+	}
+}
+
+// drawStop puts a Stop button at the right end of the pill's title row while
+// Kairo works; it stops everything, like right-click or SUPER + SHIFT + J.
+func (w *orbWindow) drawStop(screen *ebiten.Image, face *text.GoTextFace, right, top, unit float64) {
+	label := "■ Stop"
+	lw, lh := text.Measure(label, face, 0)
+	bw, bh := lw+24*unit, 22*unit
+	bx := right - bw
+	roundRect(screen, bx, top, bw, bh, bh/2, stopFill)
+	op := &text.DrawOptions{}
+	op.GeoM.Translate(bx+(bw-lw)/2, top+(bh-lh)/2)
+	op.ColorScale.ScaleWithColor(color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	text.Draw(screen, label, face, op)
+	w.buttons = append(w.buttons, button{bx, top, bx + bw, top + bh, "stop"})
 }
 
 func pillText(s voice.State) (string, string) {
@@ -263,8 +377,8 @@ func (w *orbWindow) closeRequested() bool {
 	return false
 }
 
-func daemonPID() int {
-	data, err := os.ReadFile(config.Path("daemon.pid"))
+func readPID(name string) int {
+	data, err := os.ReadFile(config.Path(name))
 	if err != nil {
 		return 0
 	}
@@ -272,13 +386,17 @@ func daemonPID() int {
 	return pid
 }
 
-func daemonAlive() bool {
-	pid := daemonPID()
+func alive(pid int) bool {
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
+// daemonAlive also counts a standalone `kairo listen` (no daemon running).
+func daemonAlive() bool {
+	return alive(readPID("daemon.pid")) || alive(readPID("listen.pid"))
+}
+
 func signalDaemon(sig syscall.Signal) {
-	if pid := daemonPID(); pid > 0 {
+	if pid := readPID("daemon.pid"); pid > 0 {
 		syscall.Kill(pid, sig)
 	}
 }

@@ -22,7 +22,8 @@ var askCmd = &cobra.Command{
 		}
 		defer a.Store.Close()
 		a.Approvals.Send = nil
-		a.Approvals.Voice = approval.Terminal{}
+		a.Approvals.Card = nil
+		a.Approvals.Local = approval.Terminal{}
 		reply := a.Agent.Handle(cmd.Context(), agent.Input{Text: strings.Join(args, " "), Origin: "cli"})
 		fmt.Println(reply)
 		return nil

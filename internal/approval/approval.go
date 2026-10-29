@@ -29,12 +29,17 @@ type Asker interface {
 	AskYesNo(ctx context.Context, question string, wait time.Duration) string
 }
 
+// Broker never asks by voice: listening would grab the mic (and switch
+// Bluetooth headsets out of music mode) while the owner is busy. Questions go
+// to Card (Yes / No / Later buttons on screen), Send (phone) and Local.
 type Broker struct {
 	mu      sync.Mutex
 	next    int
 	pending map[string]chan string
-	Voice   Asker
+	waiting []Request
+	Local   Asker
 	Send    func(r Request)
+	Card    func(r *Request)
 	Wait    time.Duration
 }
 
@@ -46,23 +51,32 @@ func (b *Broker) Ask(ctx context.Context, r Request) string {
 	b.mu.Lock()
 	b.next++
 	r.ID = fmt.Sprintf("a%d", b.next)
+	if r.Wait == 0 {
+		r.Wait = b.Wait
+	}
 	answer := make(chan string, 3)
 	b.pending[r.ID] = answer
+	b.waiting = append(b.waiting, r)
+	b.showCard()
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
 		delete(b.pending, r.ID)
+		for i, w := range b.waiting {
+			if w.ID == r.ID {
+				b.waiting = append(b.waiting[:i], b.waiting[i+1:]...)
+				break
+			}
+		}
+		b.showCard()
 		b.mu.Unlock()
 	}()
-	if r.Wait == 0 {
-		r.Wait = b.Wait
-	}
 	if b.Send != nil {
 		b.Send(r)
 	}
-	if b.Voice != nil {
+	if b.Local != nil {
 		go func() {
-			if a := b.Voice.AskYesNo(ctx, r.Question, r.Wait); a != Timeout {
+			if a := b.Local.AskYesNo(ctx, r.Question, r.Wait); a != Timeout {
 				answer <- a
 			}
 		}()
@@ -75,6 +89,18 @@ func (b *Broker) Ask(ctx context.Context, r Request) string {
 	case <-ctx.Done():
 		return Timeout
 	}
+}
+
+func (b *Broker) showCard() {
+	if b.Card == nil {
+		return
+	}
+	if len(b.waiting) == 0 {
+		b.Card(nil)
+		return
+	}
+	first := b.waiting[0]
+	b.Card(&first)
 }
 
 func (b *Broker) Resolve(id, answer string) bool {

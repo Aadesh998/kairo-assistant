@@ -34,9 +34,9 @@ Written in Go as one CLI binary, built for Arch Linux + Hyprland (Omarchy).
 
 | Area | What it does |
 |---|---|
-| **Voice** | Hold **Space + K**. A glass orb appears and Kairo says "Yes?". It listens and answers out loud, and the status pill under the orb shows what it heard and what it's doing. |
+| **Voice** | Hold **Space + K**. A glass orb appears and Kairo says "Yes?". It listens and answers out loud, and the status pill under the orb shows what it heard and what it's doing. The mic is only open while you give a request: once Kairo starts running something, it lets go of the mic so your music or video keeps playing. |
 | **Computer control** | Opens apps and links, switches windows and workspaces, types, reads the screen (screenshot + vision), runs safe commands. |
-| **Meetings** | Syncs Google Calendar. Two minutes before a meeting with a Meet, Zoom or Teams link it asks "Shall I join?", then opens it with mic and camera off. It can also join at a set time ("join the meet at 3"). |
+| **Meetings** | Syncs Google Calendar. Two minutes before a meeting with a Meet, Zoom or Teams link it shows a "Shall I join?" card, then opens it with mic and camera off. It can also join at a set time ("join the meet at 3"). |
 | **Gmail** | Watches your inbox over IMAP and rates each new mail as urgent, important, normal or ignore. Important mail gets a notification, and mail that needs action becomes a task with a due time. |
 | **Reminders and tasks** | "Remind me at 5 to send the invoice". Reminders survive restarts. You get a morning brief and an evening summary. |
 | **Notifications** | The orb pops up with the message, Kairo says it, and it's also sent to Telegram, Slack or WhatsApp. Quiet hours are respected. |
@@ -45,7 +45,8 @@ Written in Go as one CLI binary, built for Arch Linux + Hyprland (Omarchy).
 | **Send files** | "Send me the latest APK": files up to 50 MB arrive in Telegram or Slack. Bigger files are uploaded to your own Google Drive and the link is sent. Protected files are never sent. |
 | **Memory and learning** | Remembers facts about you and learns from your approvals, corrections and 👍/👎. After enough approvals it stops asking for routine actions. |
 | **Fast decisions** | Uses Jev (TypeSafe AI) for quick typed decisions, such as whether a mail is important or a sentence is a fact to remember, and falls back to Claude without it. |
-| **Interrupt** | Say "stop" while it works, press SUPER + SHIFT + J, send `/stop` on Telegram, or right-click the orb. |
+| **Approvals** | When an action needs your OK, Kairo never asks out loud. A card with **Yes / No / Later** buttons appears under the orb (with a chime) and on your phone. Click or tap one. |
+| **Interrupt** | Click **■ Stop** on the orb's pill, press SUPER + SHIFT + J, send `/stop` on Telegram, or right-click the orb. |
 | **Guardrails** | Secrets, production keys, deploys and destructive commands are blocked in code. Nothing is sent to other people without your approval. |
 
 ---
@@ -170,9 +171,27 @@ After any change, run `systemctl --user restart kairo`.
 ### By voice
 1. Hold **Space + K**. You hear a chime, the orb appears, and Kairo says "Yes?".
 2. Speak, for example "what's on my calendar today?". The pill shows what Kairo heard, each step it takes, then its answer.
-3. Say "stop" or "never mind" to interrupt. Say "go to sleep", stay quiet for 60 s, or right-click the orb to end the session.
+3. If your request makes Kairo do something (open an app, run a command, delegate a job...), it says what it did in one sentence and goes back to sleep, so the mic is released right away. After a plain question it keeps listening for a follow-up.
+4. To stop running work, click **■ Stop** on the pill (shown while it says WORKING), press SUPER + SHIFT + J, or right-click the orb. Say "go to sleep", stay quiet for 60 s, or right-click the orb to end the session.
+
+Kairo never asks you questions by voice. Anything that needs your OK appears as a card under the orb with **Yes / No / Later** buttons, and the same buttons arrive on Telegram. Answer from whichever is closer. If you don't answer, the request times out after `notify.approval_seconds`.
+
+> **Bluetooth headphones:** opening a Bluetooth mic switches the headset from music mode (A2DP) to call mode (HFP), which pauses YouTube and lowers audio quality. Kairo keeps the mic closed while it works, but each Space + K still opens it briefly. To avoid that completely, set `voice.mic` to your laptop's built-in mic (see `wpctl status`).
 
 You can drag the orb anywhere; it remembers the position. Double-click or right-click it to close it.
+
+### Chat window (text only)
+With voice turned off (`voice.enabled: false`), **Space + K** opens the Kairo chat window instead of the mic. Pressing it again focuses the window that's already open. You can also open it with `kairo chat`.
+
+| Tab | What you can do |
+|---|---|
+| **Chat** | Type a request and press Enter. The line above the input shows what Kairo is doing. ↑/↓ scrolls, **ctrl+x** stops the current work. |
+| **Tasks** | Your open tasks, with overdue ones marked. ↑/↓ selects, **d** marks done, **s** snoozes 10 minutes. |
+| **Activity** | Everything Kairo did today, newest first. |
+
+Switch tabs with **Tab** (or alt+1/2/3). **Esc** closes the window, and work keeps running in the background. When an action needs your OK, a bar appears in every tab: press **y**, **n** or **l** (Later). The same question also goes to Telegram. Reminders and job results show up in Chat as updates.
+
+The window talks to the running daemon over `~/.kairo/kairo.sock`, so `kairo start` (or the systemd service) has to be running.
 
 ### From the terminal
 ```bash
@@ -195,7 +214,7 @@ Messages are handled by Kairo on your PC, so the PC has to be on.
 | When | What |
 |---|---|
 | Morning (`routine` in persona) | Spoken brief: meetings, important mail, tasks |
-| 2 min before a calendar meeting | "Shall I join?", then opens it with mic and camera off |
+| 2 min before a calendar meeting | "Shall I join?" card (Yes / No / Later), then opens it with mic and camera off |
 | 10 min before other events | Reminder |
 | A task is due | Reminder with Done / Snooze buttons |
 | Important email arrives | Notification, plus a task if action is needed |
@@ -220,9 +239,10 @@ kairo activity -t -f    # everything it did today, live
 | `kairo start [-d]` | Run Kairo in the foreground (`-d` = background) |
 | `kairo stop` | Stop Kairo |
 | `kairo status` | Show state, channels, mail/calendar/Jev, next routine |
-| `kairo listen` | Wake Kairo (this is what Space + K runs) |
+| `kairo listen` | Wake Kairo, or open the chat window when voice is off (this is what Space + K runs) |
 | `kairo sleep` / `kairo cancel` | Stop everything now: current task, meeting joins, orb |
 | `kairo ask "<request>"` | One request from the terminal |
+| `kairo chat` | Chat window with Chat, Tasks and Activity tabs |
 | `kairo mic` | Test the microphone: speak and see what was heard |
 | `kairo activity [-t] [-n N] [-f]` | Activity log (today, count, follow) |
 | `kairo tui` | Live dashboard |
@@ -335,7 +355,7 @@ kairo/
 │   ├── tools/                  everything Kairo can do: apps, windows, keyboard, screen, browser,
 │   │                           tasks, schedule, calendar, mail, memory, skills, delegate
 │   ├── policy/                 safe / ask / never rules and protected paths
-│   ├── approval/               asks you by voice, phone or terminal
+│   ├── approval/               asks you with an orb card, phone or terminal
 │   ├── voice/                  mic, session (Space + K, announce, interrupt), ElevenLabs / whisper / Piper
 │   ├── orb/                    orb renderer, frames and window
 │   ├── channels/               Telegram, Slack, WhatsApp and the notifier

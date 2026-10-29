@@ -11,12 +11,16 @@ import (
 	"time"
 	"unicode"
 
-	"kairo/internal/approval"
 	"kairo/internal/config"
 )
 
-type Handler func(ctx context.Context, text string) string
+// Handler runs one request and reports whether it took any action (ran a
+// tool). After an action the session ends at once so the mic is released.
+type Handler func(ctx context.Context, text string) (reply string, acted bool)
 
+// The mic is opened only while the owner is giving a request. Work, approvals
+// and announcements never listen: an open mic switches Bluetooth headsets to
+// headset mode, which pauses whatever else is playing.
 type Session struct {
 	cfg      config.Voice
 	ui       config.UI
@@ -24,11 +28,8 @@ type Session struct {
 	handle   Handler
 	log      func(kind, text string)
 	micMu    sync.Mutex
-	busy     atomic.Bool
 	awake    atomic.Bool
 	wakeFlag atomic.Bool
-	cancelMu sync.Mutex
-	cancel   context.CancelFunc
 	convMu   sync.Mutex
 	stopConv context.CancelFunc
 	noticeMu sync.Mutex
@@ -49,25 +50,6 @@ func NewSession(cfg *config.Config, handle Handler, log func(kind, text string))
 
 func (s *Session) Wake() {
 	s.wakeFlag.Store(true)
-	s.cancelMu.Lock()
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.cancelMu.Unlock()
-}
-
-func (s *Session) listen(ctx context.Context, o RecordOptions) []byte {
-	ctx, cancel := context.WithCancel(ctx)
-	s.cancelMu.Lock()
-	s.cancel = cancel
-	s.cancelMu.Unlock()
-	defer func() {
-		s.cancelMu.Lock()
-		s.cancel = nil
-		s.cancelMu.Unlock()
-		cancel()
-	}()
-	return s.record(ctx, o)
 }
 
 func (s *Session) Awake() bool {
@@ -182,14 +164,15 @@ func (s *Session) Converse(parent context.Context) {
 			return
 		}
 		SetMode("thinking", "“"+text+"”")
-		reply, stopped := s.work(ctx, text)
+		reply, acted := s.handle(ctx, text)
 		if ctx.Err() != nil {
 			return
 		}
-		if stopped {
-			reply = "Okay, I stopped."
-		}
 		s.Say(ctx, reply)
+		if acted {
+			s.log("voice", "task done; released the mic")
+			return
+		}
 		text = ""
 	}
 }
@@ -198,8 +181,6 @@ func (s *Session) Say(ctx context.Context, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	s.busy.Store(true)
-	defer s.busy.Store(false)
 	previous := Mode()
 	SetMode("speaking", text)
 	if err := Speak(ctx, s.cfg, text); err != nil {
@@ -207,86 +188,6 @@ func (s *Session) Say(ctx context.Context, text string) {
 		exec.Command("notify-send", "Kairo", text).Run()
 	}
 	SetMode(previous, "")
-}
-
-func (s *Session) work(ctx context.Context, text string) (string, bool) {
-	taskCtx, stopTask := context.WithCancel(ctx)
-	defer stopTask()
-	watchCtx, stopWatch := context.WithCancel(ctx)
-	defer stopWatch()
-	done := make(chan string, 1)
-	go func() {
-		done <- s.handle(taskCtx, text)
-		stopWatch()
-	}()
-	for {
-		select {
-		case reply := <-done:
-			return reply, false
-		default:
-		}
-		if s.busy.Load() {
-			select {
-			case reply := <-done:
-				return reply, false
-			case <-time.After(200 * time.Millisecond):
-			}
-			continue
-		}
-		pcm := s.listen(watchCtx, RecordOptions{WaitStart: 1500 * time.Millisecond, MaxLength: 4 * time.Second, Silence: 700 * time.Millisecond})
-		if pcm == nil || watchCtx.Err() != nil {
-			continue
-		}
-		heard, err := Transcribe(watchCtx, s.cfg, pcm)
-		if err == nil && isInterrupt(heard) {
-			s.log("voice", "interrupted: "+heard)
-			stopTask()
-			<-done
-			return "", true
-		}
-	}
-}
-
-func isInterrupt(text string) bool {
-	heard := " " + normalize(text) + " "
-	for _, w := range []string{"stop", "cancel", "abort", "wait", "hold on", "never mind", "nevermind", "don t", "dont", "do not"} {
-		if strings.Contains(heard, " "+w+" ") {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Session) interruptListen() {
-	s.cancelMu.Lock()
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.cancelMu.Unlock()
-}
-
-func (s *Session) AskYesNo(ctx context.Context, question string, wait time.Duration) string {
-	s.busy.Store(true)
-	defer s.busy.Store(false)
-	s.interruptListen()
-	LaunchOrb(s.ui)
-	s.Say(ctx, question)
-	previous := Mode()
-	SetMode("listening", question)
-	defer SetMode(previous, "")
-	pcm := s.record(ctx, RecordOptions{WaitStart: wait, MaxLength: 8 * time.Second, Silence: time.Second})
-	if pcm == nil {
-		return approval.Timeout
-	}
-	heard, err := Transcribe(ctx, s.cfg, pcm)
-	if err != nil {
-		return approval.Timeout
-	}
-	s.log("voice", "answer: "+heard)
-	if answer := approval.ParseAnswer(heard); answer != "" {
-		return answer
-	}
-	return approval.Timeout
 }
 
 func (s *Session) record(ctx context.Context, o RecordOptions) []byte {

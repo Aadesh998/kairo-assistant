@@ -121,5 +121,5 @@ func StatusLine() string {
 	if pid, ok := daemon.RunningPID(); ok {
 		daemonText = fmt.Sprintf("running (pid %d)", pid)
 	}
-	return fmt.Sprintf("daemon: %s   voice: %s", daemonText, voice.ReadState().Mode)
+	return fmt.Sprintf("daemon: %s   state: %s", daemonText, voice.ReadState().Mode)
 }

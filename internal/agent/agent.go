@@ -56,6 +56,12 @@ type turn struct {
 }
 
 func (a *Agent) Handle(ctx context.Context, in Input) string {
+	reply, _ := a.Run(ctx, in)
+	return reply
+}
+
+// Run is Handle that also returns the actions (tool calls) the turn took.
+func (a *Agent) Run(ctx context.Context, in Input) (string, []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
@@ -104,7 +110,7 @@ func (a *Agent) Handle(ctx context.Context, in Input) string {
 	if in.Autonomous || len(t.auto) > 0 || voiceUpdate {
 		a.sendUpdate(ctx, in, reply, t)
 	}
-	return reply
+	return reply, t.actions
 }
 
 func (a *Agent) Stop() {

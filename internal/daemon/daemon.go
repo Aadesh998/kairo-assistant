@@ -29,15 +29,15 @@ func Run(ctx context.Context) error {
 	voice.SetMode("sleeping", "")
 	defer voice.SetMode("sleeping", "")
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGUSR1, syscall.SIGUSR2)
+	signal.Notify(signals, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGHUP)
 	go func() {
 		for sig := range signals {
-			if sig == syscall.SIGUSR1 && a.Voice == nil {
-				continue
-			}
-			if sig == syscall.SIGUSR1 {
+			switch {
+			case sig == syscall.SIGHUP:
+				a.AnswerCard()
+			case sig == syscall.SIGUSR1 && a.Voice != nil:
 				a.Voice.Wake()
-			} else {
+			case sig == syscall.SIGUSR2:
 				a.StopAll()
 			}
 		}
@@ -46,6 +46,7 @@ func Run(ctx context.Context) error {
 	a.Store.Log("daemon", "started")
 	a.Notifier.Start(ctx, func(in channels.Incoming) { handleIncoming(ctx, a, in) })
 	go scheduler.Run(ctx, a)
+	go serveChat(ctx, a)
 	if a.Voice != nil {
 		go a.Voice.Run(ctx)
 	}
