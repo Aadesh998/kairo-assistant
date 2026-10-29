@@ -54,6 +54,7 @@ func serveChat(ctx context.Context, a *app.App) {
 		defer unsubscribe()
 		flusher, _ := w.(http.Flusher)
 		enc := json.NewEncoder(w)
+		enc.Encode(chat.Event{Kind: "hello"})
 		if card := a.CurrentCard(); card != nil {
 			enc.Encode(chat.Event{Kind: "ask", ID: card.ID, Text: card.Question})
 		}

@@ -61,3 +61,7 @@ func readPNG(path string) (image.Image, error) {
 	defer f.Close()
 	return png.Decode(f)
 }
+
+func LoadFrame(dir, mode string, frame int) (image.Image, error) {
+	return readPNG(FramePath(dir, mode, frame))
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,15 +20,28 @@ import (
 
 var tabs = []string{"Chat", "Tasks", "Activity"}
 
+// The orb's palette on a deep indigo glass background (the window itself is
+// themed to match in cmd/chat.go).
 var (
-	accent    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
-	dimmed    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	youStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	tabOn     = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4")).Bold(true).Padding(0, 1)
-	tabOff    = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Padding(0, 1)
+	cText     = lipgloss.Color("#e8e5fb")
+	cDim      = lipgloss.Color("#8a86b3")
+	cFaint    = lipgloss.Color("#3a3666")
+	cPanel    = lipgloss.Color("#1e1c3d")
+	cLavender = lipgloss.Color("#a08cff")
+	cPurple   = lipgloss.Color("#c08cff")
+	cBlue     = lipgloss.Color("#6fb3ff")
+	cCyan     = lipgloss.Color("#78e1f5")
+	cGreen    = lipgloss.Color("#5fd3a0")
+	cAmber    = lipgloss.Color("#f5b14c")
+	cRed      = lipgloss.Color("#ff7a8a")
+
+	textStyle = lipgloss.NewStyle().Foreground(cText)
+	dimStyle  = lipgloss.NewStyle().Foreground(cDim)
+	bold      = lipgloss.NewStyle().Bold(true)
+	rounded   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
 )
+
+const sideW = 30
 
 type entry struct {
 	who  string // you, kairo, notice, error
@@ -35,22 +49,27 @@ type entry struct {
 }
 
 type chatModel struct {
-	name     string
-	store    *store.Store
-	client   *chat.Client
-	tab      int
-	width    int
-	height   int
-	entries  []entry
-	input    []rune
-	busy     bool
-	step     string
-	ask      *chat.Event
-	scroll   int
-	tasks    []store.Task
-	cursor   int
-	activity []store.Activity
-	actTop   int
+	name      string
+	store     *store.Store
+	client    *chat.Client
+	orb       *miniOrb  // half-block fallback
+	kitty     *kittyOrb // real frames in Ghostty / kitty
+	start     time.Time
+	tab       int
+	width     int
+	height    int
+	entries   []entry
+	input     []rune
+	busy      bool
+	step      string
+	ask       *chat.Event
+	offline   bool
+	repliedAt time.Time
+	scroll    int
+	tasks     []store.Task
+	cursor    int
+	activity  []store.Activity
+	actTop    int
 }
 
 type (
@@ -61,6 +80,7 @@ type (
 	eventMsg chat.Event
 	errMsg   struct{ err error }
 	tickMsg  time.Time
+	animMsg  time.Time
 )
 
 // RunChat opens the chat window: Chat, Tasks and Activity tabs. Messages go
@@ -75,7 +95,10 @@ func RunChat() error {
 		return err
 	}
 	defer s.Close()
-	m := &chatModel{name: cfg.Name, store: s, client: chat.NewClient()}
+	m := &chatModel{name: cfg.Name, store: s, client: chat.NewClient(), start: time.Now()}
+	if !graphicsTerminal() {
+		m.orb = newMiniOrb()
+	}
 	past, _ := s.RecentMessages("chat", 40)
 	for _, msg := range past {
 		who := "kairo"
@@ -90,6 +113,9 @@ func RunChat() error {
 	defer cancel()
 	go m.watch(ctx, p)
 	_, err = p.Run()
+	if m.kitty != nil {
+		clearImages()
+	}
 	return err
 }
 
@@ -119,6 +145,10 @@ func tick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+func animate() tea.Cmd {
+	return tea.Tick(70*time.Millisecond, func(t time.Time) tea.Msg { return animMsg(t) })
+}
+
 func (m *chatModel) refresh() {
 	m.tasks, _ = m.store.OpenTasks()
 	if m.cursor >= len(m.tasks) {
@@ -129,7 +159,7 @@ func (m *chatModel) refresh() {
 }
 
 func (m *chatModel) Init() tea.Cmd {
-	return tick()
+	return tea.Batch(tick(), animate())
 }
 
 func (m *chatModel) send(text string) tea.Cmd {
@@ -163,18 +193,27 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Images are sent once the alternate screen is up: it keeps its own
+		// image storage.
+		if m.kitty == nil && m.orb == nil {
+			m.kitty = newKittyOrb()
+		}
 	case tickMsg:
 		m.refresh()
 		return m, tick()
+	case animMsg:
+		return m, animate()
 	case replyMsg:
 		m.busy, m.step = false, ""
 		if msg.err != nil {
 			m.entries = append(m.entries, entry{"error", msg.err.Error()})
 		} else {
 			m.entries = append(m.entries, entry{"kairo", msg.text})
+			m.repliedAt = time.Now()
 		}
 		m.scroll = 0
 	case eventMsg:
+		m.offline = false
 		switch msg.Kind {
 		case "step":
 			m.step = msg.Text
@@ -188,6 +227,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 		}
 	case errMsg:
+		if errors.Is(msg.err, chat.ErrNoDaemon) {
+			m.offline = true
+		}
 		m.entries = append(m.entries, entry{"error", msg.err.Error()})
 		m.scroll = 0
 	case tea.KeyMsg:
@@ -299,142 +341,273 @@ func (m *chatModel) activityKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// status is what the orb and its pill show, mirroring the floating orb.
+func (m *chatModel) status() (mode, title, text string, ink lipgloss.Color) {
+	switch {
+	case m.offline:
+		return "awake", "• OFFLINE", "Start Kairo: systemctl --user start kairo", cRed
+	case m.ask != nil:
+		return "listening", "• NEEDS YOUR OK", "Answer with y, n or l", cAmber
+	case m.busy:
+		if m.step == "" {
+			return "thinking", "• WORKING", "Thinking…", cPurple
+		}
+		return "thinking", "• WORKING", m.step, cPurple
+	case time.Since(m.repliedAt) < 3*time.Second:
+		return "speaking", "• REPLIED", "Done.", cGreen
+	case len(m.input) > 0:
+		return "listening", "• LISTENING", "Go ahead, I'm reading…", cBlue
+	}
+	return "awake", "• " + strings.ToUpper(m.name), "Ready when you are.", cLavender
+}
+
 func (m *chatModel) View() string {
-	if m.width == 0 {
+	if m.width == 0 || m.height == 0 {
 		return ""
 	}
-	header := m.header()
+	mainW := m.width
+	var side string
+	if m.width >= 72 && m.height >= 18 {
+		mainW = m.width - sideW - 2
+		side = m.sidebar()
+	}
+	main := m.mainPanel(mainW)
+	if side == "" {
+		return main
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, side, "  ", main)
+}
+
+func (m *chatModel) sidebar() string {
+	mode, title, text, ink := m.status()
+	var lines []string
+	frame := int(time.Since(m.start).Seconds() * 24)
+	var orbLines []string
+	if m.kitty != nil {
+		if orbLines = m.kitty.Frame(mode, frame); orbLines == nil {
+			orbLines = make([]string, orbRows)
+		}
+	} else if m.orb != nil {
+		rows := min(12, max(5, m.height-17))
+		if orbLines = m.orb.Frame(mode, frame, rows*2); orbLines == nil {
+			orbLines = make([]string, rows)
+		}
+	}
+	lines = append(lines, "")
+	for _, l := range orbLines {
+		lines = append(lines, lipgloss.PlaceHorizontal(sideW, lipgloss.Center, l))
+	}
+	pill := rounded.BorderForeground(cFaint).Background(cPanel).BorderBackground(lipgloss.NoColor{}).
+		Width(sideW-2).Padding(0, 1).
+		Render(bold.Foreground(ink).Background(cPanel).Render(title) + "\n" +
+			textStyle.Background(cPanel).Render(truncate(text, sideW-4)))
+	lines = append(lines, "")
+	lines = append(lines, strings.Split(pill, "\n")...)
+	lines = append(lines, "")
+	for i, t := range tabs {
+		label := t
+		if t == "Tasks" && len(m.tasks) > 0 {
+			label += dimStyle.Render(fmt.Sprintf("  %d", len(m.tasks)))
+		}
+		if i == m.tab {
+			lines = append(lines, "  "+bold.Foreground(cLavender).Render("● "+t)+strings.TrimPrefix(label, t))
+		} else {
+			lines = append(lines, "  "+dimStyle.Render("○ "+t)+strings.TrimPrefix(label, t))
+		}
+	}
+	for len(lines) < m.height-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines[:m.height-1], dimStyle.Render("  tab switch · esc close"))
+	return lipgloss.NewStyle().Width(sideW).Render(strings.Join(lines, "\n"))
+}
+
+func (m *chatModel) mainPanel(w int) string {
+	header := m.header(w)
 	var footer []string
 	if m.ask != nil {
-		footer = append(footer, m.askBar())
+		footer = append(footer, m.askBar(w))
 	}
-	footer = append(footer, m.help())
 	if m.tab == 0 {
-		footer = append(footer, m.inputLine())
+		footer = append(footer, m.inputBox(w))
 	}
-	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(strings.Join(footer, "\n"))
+	footer = append(footer, m.help(w))
+	foot := strings.Join(footer, "\n")
+	bodyH := max(0, m.height-lipgloss.Height(header)-lipgloss.Height(foot))
 	var body []string
 	switch m.tab {
 	case 0:
-		body = m.chatBody(bodyH)
+		body = m.chatBody(w, bodyH)
 	case 1:
-		body = m.taskBody()
+		body = m.taskBody(w)
 	case 2:
-		body = m.activityBody(bodyH)
+		body = m.activityBody(w, bodyH)
 	}
 	if len(body) > bodyH {
-		body = body[:max(0, bodyH)]
+		body = body[:bodyH]
 	}
 	for len(body) < bodyH {
 		body = append(body, "")
 	}
-	return header + "\n" + strings.Join(body, "\n") + "\n" + strings.Join(footer, "\n")
+	return lipgloss.NewStyle().Width(w).MaxHeight(m.height).
+		Render(header + "\n" + strings.Join(body, "\n") + "\n" + foot)
 }
 
-func (m *chatModel) header() string {
-	var parts []string
-	for i, t := range tabs {
-		if i == m.tab {
-			parts = append(parts, tabOn.Render(t))
-		} else {
-			parts = append(parts, tabOff.Render(t))
-		}
+func (m *chatModel) header(w int) string {
+	subtitle := map[int]string{
+		0: "Talk to " + m.name,
+		1: fmt.Sprintf("%d open", len(m.tasks)),
+		2: "Today, newest first",
+	}[m.tab]
+	title := bold.Foreground(cText).Render(tabs[m.tab]) + "  " + dimStyle.Render(subtitle)
+	return "\n" + title + "\n" + lipgloss.NewStyle().Foreground(cFaint).Render(strings.Repeat("─", w))
+}
+
+func (m *chatModel) askBar(w int) string {
+	text := bold.Foreground(cAmber).Render("Needs your OK") + "\n" + textStyle.Render(m.ask.Text) + "\n\n" +
+		keyCap("y", "Yes", cGreen) + "   " + keyCap("n", "No", cRed) + "   " + keyCap("l", "Later", cDim)
+	return rounded.BorderForeground(cAmber).Width(w-2).Padding(0, 1).Render(text)
+}
+
+func keyCap(key, label string, c lipgloss.Color) string {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#13122a")).Background(c).Bold(true).Padding(0, 1).Render(key) +
+		" " + lipgloss.NewStyle().Foreground(c).Render(label)
+}
+
+func (m *chatModel) inputBox(w int) string {
+	border := cLavender
+	content := textStyle.Render(string(m.input)) + lipgloss.NewStyle().Foreground(cCyan).Render("▎")
+	if len(m.input) == 0 {
+		content = lipgloss.NewStyle().Foreground(cCyan).Render("▎") + dimStyle.Render("Message "+m.name+"…")
 	}
-	title := accent.Render(" " + strings.ToUpper(m.name) + " ")
-	return title + "  " + strings.Join(parts, " ") + "\n" + dimmed.Render(strings.Repeat("─", m.width))
+	if m.busy {
+		border = cFaint
+	}
+	// Keep the end of a long message visible.
+	inner := w - 7
+	if lipgloss.Width(content) > inner {
+		runes := m.input[max(0, len(m.input)-inner+1):]
+		content = textStyle.Render(string(runes)) + lipgloss.NewStyle().Foreground(cCyan).Render("▎")
+	}
+	return rounded.BorderForeground(border).Width(w-2).Padding(0, 1).
+		Render(bold.Foreground(cLavender).Render("› ") + content)
 }
 
-func (m *chatModel) askBar() string {
-	text := warnStyle.Render("Needs your OK: ") + m.ask.Text
-	keys := youStyle.Render("[y] Yes") + "  " + errStyle.Render("[n] No") + "  " + dimmed.Render("[l] Later")
-	return lipgloss.NewStyle().Width(m.width).Border(lipgloss.NormalBorder(), true, false, false, false).
-		BorderForeground(lipgloss.Color("3")).Render(text + "\n" + keys)
-}
-
-func (m *chatModel) help() string {
+func (m *chatModel) help(w int) string {
 	var text string
 	switch m.tab {
 	case 0:
-		text = "enter send · ↑/↓ scroll · ctrl+x stop · tab switch · esc close"
-		if m.busy {
-			step := m.step
-			if step == "" {
-				step = "Thinking…"
-			}
-			return warnStyle.Render("● ") + truncate(step, m.width-20) + dimmed.Render("  (ctrl+x stop)")
-		}
+		text = "enter send · ↑/↓ scroll · ctrl+x stop"
 	case 1:
-		text = "↑/↓ select · d done · s snooze 10 min · tab switch · esc close"
+		text = "↑/↓ select · d done · s snooze 10 min"
 	case 2:
-		text = "↑/↓ scroll · g top · tab switch · esc close"
+		text = "↑/↓ scroll · g newest"
 	}
-	return dimmed.Render(text)
+	return dimStyle.Render(truncate(" "+text, w))
 }
 
-func (m *chatModel) inputLine() string {
-	return accent.Render("› ") + string(m.input) + "█"
-}
-
-func (m *chatModel) chatBody(height int) []string {
-	wrap := lipgloss.NewStyle().Width(max(10, m.width-2))
+func (m *chatModel) chatBody(w, height int) []string {
+	maxBubble := max(20, w*4/5)
 	var lines []string
 	if len(m.entries) == 0 {
-		lines = append(lines, "", dimmed.Render(" Ask "+m.name+" anything, e.g. “what's on my calendar today?”"))
+		lines = append(lines, "", dimStyle.Render("Ask "+m.name+" anything, e.g. “what's on my calendar today?”"))
 	}
 	for _, e := range m.entries {
-		var label string
-		switch e.who {
-		case "you":
-			label = youStyle.Render("You")
-		case "kairo":
-			label = accent.Render(m.name)
-		case "notice":
-			label = warnStyle.Render("Update")
-		default:
-			label = errStyle.Render("Error")
-		}
-		lines = append(lines, "", " "+label)
-		for _, l := range strings.Split(wrap.Render(e.text), "\n") {
-			lines = append(lines, " "+l)
-		}
+		lines = append(lines, "")
+		lines = append(lines, strings.Split(m.bubble(e, w, maxBubble), "\n")...)
 	}
 	if m.busy {
-		lines = append(lines, "", " "+dimmed.Render(m.name+" is working…"))
+		spin := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}[int(time.Since(m.start).Milliseconds()/90)%10]
+		lines = append(lines, "", lipgloss.NewStyle().Foreground(cPurple).Render(spin+" ")+dimStyle.Render(m.name+" is working…"))
 	}
 	end := len(lines) - min(m.scroll, max(0, len(lines)-height))
 	m.scroll = len(lines) - end
 	return lines[max(0, end-height):end]
 }
 
-func (m *chatModel) taskBody() []string {
+func (m *chatModel) bubble(e entry, w, maxBubble int) string {
+	label, border, align := m.name, cLavender, lipgloss.Left
+	switch e.who {
+	case "you":
+		label, border, align = "You", cBlue, lipgloss.Right
+	case "notice":
+		label, border = "Update", cAmber
+	case "error":
+		label, border = "Error", cRed
+	}
+	text := e.text
+	if e.who != "you" {
+		text = markdown(text)
+	}
+	textW := 0
+	for _, l := range strings.Split(text, "\n") {
+		textW = max(textW, lipgloss.Width(l))
+	}
+	box := rounded.BorderForeground(border).Padding(0, 1).Width(min(textW, maxBubble-4) + 2).
+		Foreground(cText).Render(text)
+	head := lipgloss.NewStyle().Foreground(border).Bold(true).Render(label)
+	if e.who == "kairo" {
+		head = lipgloss.NewStyle().Foreground(cCyan).Render("◉ ") + head
+	}
+	return lipgloss.NewStyle().Width(w).Align(align).Render(head + "\n" + box)
+}
+
+var (
+	mdBold   = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	mdCode   = regexp.MustCompile("`([^`]+)`")
+	mdHeader = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	mdBullet = regexp.MustCompile(`(?m)^(\s*)[-*]\s+`)
+)
+
+// markdown renders the bits of Markdown that replies use: bold, code,
+// headings and bullets.
+func markdown(text string) string {
+	text = mdHeader.ReplaceAllStringFunc(text, func(s string) string {
+		return bold.Foreground(cLavender).Render(mdHeader.FindStringSubmatch(s)[1])
+	})
+	text = mdBullet.ReplaceAllString(text, "${1}• ")
+	text = mdBold.ReplaceAllStringFunc(text, func(s string) string {
+		return bold.Foreground(cText).Render(mdBold.FindStringSubmatch(s)[1])
+	})
+	return mdCode.ReplaceAllStringFunc(text, func(s string) string {
+		return lipgloss.NewStyle().Foreground(cCyan).Render(mdCode.FindStringSubmatch(s)[1])
+	})
+}
+
+func (m *chatModel) taskBody(w int) []string {
 	lines := []string{""}
 	if len(m.tasks) == 0 {
-		return append(lines, dimmed.Render(" No open tasks."))
+		return append(lines, dimStyle.Render("No open tasks. Ask "+m.name+" to remind you of something."))
 	}
 	for i, t := range m.tasks {
-		line := fmt.Sprintf(" #%-4d %s %s", t.ID, t.Title, dimmed.Render(tools.DueText(t.DueAt)))
+		due := tools.DueText(t.DueAt)
+		dueStyle := dimStyle
 		if !t.DueAt.IsZero() && t.DueAt.Before(time.Now()) {
-			line += " " + errStyle.Render("overdue")
+			due, dueStyle = "overdue · "+t.DueAt.Local().Format("Mon 15:04"), lipgloss.NewStyle().Foreground(cRed)
 		}
+		marker, title, row := "  ", textStyle, lipgloss.NewStyle().Width(w)
 		if i == m.cursor {
-			line = accent.Render("▸") + line
-		} else {
-			line = " " + line
+			marker = lipgloss.NewStyle().Foreground(cLavender).Background(cPanel).Render("▍ ")
+			title = title.Background(cPanel).Bold(true)
+			row = row.Background(cPanel)
+			dueStyle = dueStyle.Background(cPanel)
 		}
-		lines = append(lines, truncate(line, m.width))
+		lines = append(lines, row.Render(marker+title.Render(truncate(t.Title, w-4))))
+		lines = append(lines, row.Render(marker+dueStyle.Render(strings.Trim(due, "()"))), "")
 	}
 	return lines
 }
 
-func (m *chatModel) activityBody(height int) []string {
+func (m *chatModel) activityBody(w, height int) []string {
 	lines := []string{""}
 	if len(m.activity) == 0 {
-		return append(lines, dimmed.Render(" Nothing yet today."))
+		return append(lines, dimStyle.Render("Nothing yet today."))
 	}
 	for _, a := range m.activity[min(m.actTop, len(m.activity)):] {
 		text := strings.Join(strings.Fields(a.Text), " ")
-		line := fmt.Sprintf(" %s  %-9s %s", dimmed.Render(a.At.Local().Format("15:04:05")), kindStyle(a.Kind).Render(a.Kind), text)
-		lines = append(lines, truncate(line, m.width))
+		line := dimStyle.Render(a.At.Local().Format("15:04")) + "  " +
+			lipgloss.NewStyle().Foreground(kindColor(a.Kind)).Width(9).Render(a.Kind) + " " + textStyle.Render(text)
+		lines = append(lines, truncate(line, w))
 		if len(lines) >= height {
 			break
 		}
@@ -442,14 +615,20 @@ func (m *chatModel) activityBody(height int) []string {
 	return lines
 }
 
-func kindStyle(kind string) lipgloss.Style {
+func kindColor(kind string) lipgloss.Color {
 	switch kind {
 	case "error", "blocked", "denied":
-		return errStyle
-	case "reply", "tool":
-		return accent
+		return cRed
+	case "reply":
+		return cGreen
+	case "tool":
+		return cLavender
+	case "chat", "voice", "telegram", "cli":
+		return cBlue
+	case "notify", "meeting", "mail":
+		return cAmber
 	}
-	return dimmed
+	return cDim
 }
 
 func truncate(s string, width int) string {
