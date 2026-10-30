@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -142,4 +143,19 @@ func checkCommand(command string) (Level, string) {
 		return Safe, action
 	}
 	return Ask, action
+}
+
+var secretWords = regexp.MustCompile(`(?i)\b(passwords?|passwd|passcodes?|otp|pin\s*code|api[\s_-]?keys?|secret|tokens?|private[\s_-]?key|credentials?|cvv|card\s*number|ssn)\b|sk-[a-z0-9_-]{10,}|ghp_[a-z0-9]{20,}|AKIA[0-9A-Z]{16}`)
+
+// Critical reports whether an Ask action still needs the owner's yes even when
+// the owner asked for it directly: shell commands, handing work to another
+// agent, and anything that touches secrets (.env, passwords, keys, tokens).
+func Critical(tool string, in map[string]any) bool {
+	switch tool {
+	case "run_command", "delegate_task":
+		return true
+	}
+	data, _ := json.Marshal(in)
+	text := string(data)
+	return Protected(text) || secretWords.MatchString(text)
 }

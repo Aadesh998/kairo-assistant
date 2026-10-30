@@ -156,7 +156,9 @@ func (a *Agent) runTool(ctx context.Context, in Input, use anthropic.BetaToolUse
 		a.Store.Log("blocked", detail)
 		return toolResult(use.ID, "Blocked by Kairo's safety policy. Do not try this again.", nil, true)
 	case policy.Ask:
-		if auto, score := a.Learner.Auto(action); auto {
+		if !in.Autonomous && !policy.Critical(use.Name, input) {
+			// The owner asked for this directly; only critical actions need a second yes.
+		} else if auto, score := a.Learner.Auto(action); auto {
 			t.auto = append(t.auto, fmt.Sprintf("%s (learned from your approvals, score %.2f)", detail, score))
 		} else {
 			answer := a.Approvals.Ask(ctx, approval.Request{Action: action, Question: "May I " + detail + "?", Reason: in.Reason})
